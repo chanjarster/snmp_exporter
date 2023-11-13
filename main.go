@@ -38,6 +38,7 @@ import (
 
 	"github.com/prometheus/snmp_exporter/collector"
 	"github.com/prometheus/snmp_exporter/config"
+	"github.com/prometheus/snmp_exporter/sidecar"
 )
 
 const (
@@ -45,10 +46,11 @@ const (
 )
 
 var (
-	configFile  = kingpin.Flag("config.file", "Path to configuration file.").Default("snmp.yml").Strings()
-	dryRun      = kingpin.Flag("dry-run", "Only verify configuration is valid and exit.").Default("false").Bool()
-	concurrency = kingpin.Flag("snmp.module-concurrency", "The number of modules to fetch concurrently per scrape").Default("1").Int()
-	metricsPath = kingpin.Flag(
+	configFile       = kingpin.Flag("config.file", "Path to configuration file.").Default("snmp.yml").Strings()
+	customConfigFile = kingpin.Flag("custom.config.file", "Path to custom configuration file.").Default("").String()
+	dryRun           = kingpin.Flag("dry-run", "Only verify configuration is valid and exit.").Default("false").Bool()
+	concurrency      = kingpin.Flag("snmp.module-concurrency", "The number of modules to fetch concurrently per scrape").Default("1").Int()
+	metricsPath      = kingpin.Flag(
 		"web.telemetry-path",
 		"Path under which to expose metrics.",
 	).Default("/metrics").String()
@@ -191,6 +193,16 @@ func main() {
 		*concurrency = 1
 	}
 
+	if customConfigFile != nil && strings.TrimSpace(*customConfigFile) != "" {
+		// 因 snmp_exporter 支持加载多个配置文件
+		// 因此，我们把自定义的配置文件追加到 --config.file 后面
+		modConfigFile := make([]string, len((*configFile))+1)
+		copy(modConfigFile, *configFile)
+		modConfigFile[len(modConfigFile)-1] = *customConfigFile
+		configFile = &modConfigFile
+	} else {
+		level.Warn(logger).Log("msg", "--custom.config.file not provided, sidecar API will not work")
+	}
 	level.Info(logger).Log("msg", "Starting snmp_exporter", "version", version.Info(), "concurrency", concurrency)
 	level.Info(logger).Log("build_context", version.BuildContext())
 
@@ -336,6 +348,12 @@ func main() {
 		}
 		w.Write(c)
 	})
+
+	// EXTENSION: sidecar API
+	sidecarSvc := sidecar.NewSidecarSvc(log.With(logger, "component", "sidecar"), *customConfigFile)
+	sidecarHandler := sidecar.NewSidecarHandler(log.With(logger, "handler", "sidecar"), sidecarSvc, reloadCh)
+	http.HandleFunc("/-/sidecar/config", sidecarHandler.UpdateConfig)
+	http.HandleFunc("/-/sidecar/last-update-ts", sidecarHandler.GetLastUpdateTs)
 
 	srv := &http.Server{}
 	if err := web.ListenAndServe(srv, toolkitFlags, logger); err != nil {
