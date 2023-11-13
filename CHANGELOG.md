@@ -1,3 +1,7 @@
+## 0.24.1-mod.0 / 2023-11-13
+
+* Custom mod version
+
 ## 0.24.1 / 2023-09-01
 
 * [BUGFIX] Remove auth label from collection metric #981
