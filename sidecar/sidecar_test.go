@@ -47,6 +47,7 @@ func Test_sidecarService_UpdateConfigReload(t *testing.T) {
 	}
 
 	rt := s.GetRuntimeInfo()
+	require.Equal(t, brand, rt.Brand)
 	require.Equal(t, "", rt.ZoneId)
 	require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
@@ -73,6 +74,7 @@ auths:
 
 	// 绑定的 zoneId 变更了，更新时间戳也变了
 	rt = s.GetRuntimeInfo()
+	require.Equal(t, brand, rt.Brand)
 	require.Equal(t, cmd.ZoneId, rt.ZoneId)
 	require.NotEqual(t, time.Time{}, rt.LastUpdateTs)
 
@@ -93,10 +95,7 @@ func Test_sidecarService_UpdateConfigReload_ZoneIdMismatch(t *testing.T) {
 
 	// 准备一下文件
 	err = os.WriteFile(configFile, templateConfigYaml, 0o666)
-	if err != nil {
-		t.Error(err)
-		return
-	}
+	require.NoError(t, err)
 
 	s := &sidecarService{
 		logger:     log.NewLogfmtLogger(os.Stdout),
@@ -104,6 +103,7 @@ func Test_sidecarService_UpdateConfigReload_ZoneIdMismatch(t *testing.T) {
 	}
 
 	rt := s.GetRuntimeInfo()
+	require.Equal(t, brand, rt.Brand)
 	require.Equal(t, "", rt.ZoneId)
 	require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
@@ -130,6 +130,7 @@ auths:
 		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
 		require.NoError(t, err)
 		rt = s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
 		require.Equal(t, "default", rt.ZoneId)
 		require.NotEqual(t, time.Time{}, rt.LastUpdateTs)
 	}
@@ -173,12 +174,8 @@ auths:
 }
 
 func Test_sidecarService_UpdateConfigReload_ErrorRestore(t *testing.T) {
-
-	testDir, err := os.MkdirTemp("", "snmp-config")
-	require.NoError(t, err)
-
+	testDir := t.TempDir()
 	fmt.Println("test dir:", testDir)
-	defer os.RemoveAll(testDir)
 
 	configFile := filepath.Join(testDir, "snmp.yml")
 	templateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
@@ -219,6 +216,7 @@ modules:
 		require.Error(t, err, "UpdateConfigReload should return err")
 		// 绑定的 zoneId 依然是空，时间戳也是空
 		rt = s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
 		require.Equal(t, "", rt.ZoneId)
 		require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
@@ -251,12 +249,179 @@ auths:
 		require.Error(t, err, "UpdateConfigReload should return err")
 		// 绑定的 zoneId 依然是空，时间戳也是空
 		rt = s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
 		require.Equal(t, "", rt.ZoneId)
 		require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
 		afterUpdateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
 		require.NoError(t, err)
 		require.Equal(t, templateConfigYaml, afterUpdateConfigYaml, "UpdateConfigReload fail should keep old file unchanged")
+	})
+
+}
+
+func Test_sidecarService_ResetConfig(t *testing.T) {
+	testDir := t.TempDir()
+	fmt.Println("test dir:", testDir)
+
+	configFile := filepath.Join(testDir, "snmp.yml")
+	templateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
+	require.NoError(t, err)
+
+	// 准备一下文件
+	err = os.WriteFile(configFile, templateConfigYaml, 0o666)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	s := &sidecarService{
+		logger:     log.NewLogfmtLogger(os.Stdout),
+		configFile: configFile,
+	}
+
+	rt := s.GetRuntimeInfo()
+	require.Equal(t, brand, rt.Brand)
+	require.Equal(t, "", rt.ZoneId)
+	require.Equal(t, time.Time{}, rt.LastUpdateTs)
+
+	t.Run("reset empty", func(t *testing.T) {
+		reloadCh := make(chan chan error)
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+		require.NoError(t, s.ResetConfigReload(context.TODO(), "default", reloadCh))
+
+		rt := s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
+		require.Equal(t, "", rt.ZoneId)
+		require.Equal(t, time.Time{}, rt.LastUpdateTs)
+
+		// 配置文件被重置
+		configFileB, err := os.ReadFile(configFile)
+		require.NoError(t, err)
+		require.NotEqual(t, templateConfigYaml, configFileB)
+	})
+
+	t.Run("reset non-empty", func(t *testing.T) {
+		cmd := &UpdateConfigCmd{
+			ZoneId: "default",
+			Yaml: `
+auths:
+  test_v1:
+    community: public
+    security_level: noAuthNoPriv
+    auth_protocol: MD5
+    priv_protocol: DES
+    version: 1
+`,
+		}
+
+		reloadCh := make(chan chan error)
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+
+		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
+		require.NoError(t, err)
+
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+		require.NoError(t, s.ResetConfigReload(context.TODO(), "default", reloadCh))
+
+		rt := s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
+		require.Equal(t, "", rt.ZoneId)
+		require.Equal(t, time.Time{}, rt.LastUpdateTs)
+
+		// 配置文件被重置
+		configFileB, err := os.ReadFile(configFile)
+		require.NoError(t, err)
+		require.NotEqual(t, []byte(cmd.Yaml), configFileB)
+	})
+
+	t.Run("reset zone_id mismatch", func(t *testing.T) {
+		cmd := &UpdateConfigCmd{
+			ZoneId: "default",
+			Yaml: `
+auths:
+  test_v1:
+    community: public
+    security_level: noAuthNoPriv
+    auth_protocol: MD5
+    priv_protocol: DES
+    version: 1
+`,
+		}
+
+		reloadCh := make(chan chan error)
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+
+		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
+		require.NoError(t, err)
+
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+		require.Error(t, s.ResetConfigReload(context.TODO(), "default2", reloadCh))
+
+		rt := s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
+		require.Equal(t, "default", rt.ZoneId)
+		require.NotEqual(t, time.Time{}, rt.LastUpdateTs)
+
+		// 配置文件没有被重置
+		configFileB, err := os.ReadFile(configFile)
+		require.NoError(t, err)
+		require.Equal(t, []byte(cmd.Yaml), configFileB)
+	})
+
+	t.Run("reset reload error", func(t *testing.T) {
+		cmd := &UpdateConfigCmd{
+			ZoneId: "default",
+			Yaml: `
+auths:
+  test_v1:
+    community: public
+    security_level: noAuthNoPriv
+    auth_protocol: MD5
+    priv_protocol: DES
+    version: 1
+`,
+		}
+
+		reloadCh := make(chan chan error)
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+
+		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
+		require.NoError(t, err)
+
+		go func() {
+			ch := <-reloadCh
+			ch <- errors.New("on purpose")
+		}()
+		require.Error(t, s.ResetConfigReload(context.TODO(), "default", reloadCh))
+
+		rt := s.GetRuntimeInfo()
+		require.Equal(t, brand, rt.Brand)
+		require.Equal(t, "default", rt.ZoneId)
+		require.NotEqual(t, time.Time{}, rt.LastUpdateTs)
+
+		// 配置文件没有被重置
+		configFileB, err := os.ReadFile(configFile)
+		require.NoError(t, err)
+		require.Equal(t, []byte(cmd.Yaml), configFileB)
 	})
 
 }
