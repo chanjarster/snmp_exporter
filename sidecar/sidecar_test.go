@@ -27,21 +27,12 @@ import (
 )
 
 func Test_sidecarService_UpdateConfigReload(t *testing.T) {
-	testDir, err := os.MkdirTemp("", "snmp-config")
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
+	testDir := t.TempDir()
 	fmt.Println("test dir:", testDir)
-	defer os.RemoveAll(testDir)
 
 	configFile := filepath.Join(testDir, "snmp.yml")
 	templateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
-	if err != nil {
-		t.Error(err)
-		return
-	}
+	require.NoError(t, err)
 
 	// 准备一下文件
 	err = os.WriteFile(configFile, templateConfigYaml, 0o666)
@@ -55,11 +46,71 @@ func Test_sidecarService_UpdateConfigReload(t *testing.T) {
 		configFile: configFile,
 	}
 
-	require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "should not be updated")
+	rt := s.GetRuntimeInfo()
+	require.Equal(t, "", rt.ZoneId)
+	require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
-	t.Run("success", func(t *testing.T) {
+	cmd := &UpdateConfigCmd{
+		ZoneId: "default",
+		Yaml: `
+auths:
+  test_v1:
+    community: public
+    security_level: noAuthNoPriv
+    auth_protocol: MD5
+    priv_protocol: DES
+    version: 1
+`,
+	}
 
+	reloadCh := make(chan chan error)
+	go func() {
+		ch := <-reloadCh
+		ch <- nil
+	}()
+	err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
+	require.NoError(t, err)
+
+	// 绑定的 zoneId 变更了，更新时间戳也变了
+	rt = s.GetRuntimeInfo()
+	require.Equal(t, cmd.ZoneId, rt.ZoneId)
+	require.NotEqual(t, time.Time{}, rt.LastUpdateTs)
+
+	// 配置文件写入了
+	configFileB, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	require.NotEqual(t, templateConfigYaml, configFileB)
+
+}
+
+func Test_sidecarService_UpdateConfigReload_ZoneIdMismatch(t *testing.T) {
+	testDir := t.TempDir()
+	fmt.Println("test dir:", testDir)
+
+	configFile := filepath.Join(testDir, "snmp.yml")
+	templateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
+	require.NoError(t, err)
+
+	// 准备一下文件
+	err = os.WriteFile(configFile, templateConfigYaml, 0o666)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	s := &sidecarService{
+		logger:     log.NewLogfmtLogger(os.Stdout),
+		configFile: configFile,
+	}
+
+	rt := s.GetRuntimeInfo()
+	require.Equal(t, "", rt.ZoneId)
+	require.Equal(t, time.Time{}, rt.LastUpdateTs)
+
+	{
+		// 先做一次更新
 		cmd := &UpdateConfigCmd{
+			ZoneId: "default",
 			Yaml: `
 auths:
   test_v1:
@@ -76,13 +127,52 @@ auths:
 			ch := <-reloadCh
 			ch <- nil
 		}()
-		require.NoError(t, s.UpdateConfigReload(context.TODO(), cmd, reloadCh))
-		require.NotEqual(t, time.Time{}, s.GetLastUpdateTs(), "GetLastUpdateTs() still zero")
-	})
+		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
+		require.NoError(t, err)
+		rt = s.GetRuntimeInfo()
+		require.Equal(t, "default", rt.ZoneId)
+		require.NotEqual(t, time.Time{}, rt.LastUpdateTs)
+	}
+
+	{
+		lastRt := s.GetRuntimeInfo()
+		lastConfigFileB, err := os.ReadFile(configFile)
+		require.NoError(t, err)
+
+		// 下达一个 zoneId 不匹配的指令
+		cmd2 := &UpdateConfigCmd{
+			ZoneId: "default2",
+			Yaml: `
+auths:
+  test_v1:
+    community: public
+    security_level: noAuthNoPriv
+    auth_protocol: MD5
+    priv_protocol: DES
+    version: 1
+`,
+		}
+
+		reloadCh := make(chan chan error)
+		go func() {
+			ch := <-reloadCh
+			ch <- nil
+		}()
+		err = s.UpdateConfigReload(context.TODO(), cmd2, reloadCh)
+		require.Error(t, err)
+
+		thisRt := s.GetRuntimeInfo()
+		// 配置绑定 zoneId 没有变更，时间戳也没变
+		require.Equal(t, lastRt, thisRt)
+		// 配置文件也没有变更
+		thisConfigFileB, err := os.ReadFile(configFile)
+		require.NoError(t, err)
+		require.Equal(t, lastConfigFileB, thisConfigFileB)
+	}
 
 }
 
-func Test_sidecarService_UpdateConfigReload_FailRecover(t *testing.T) {
+func Test_sidecarService_UpdateConfigReload_ErrorRestore(t *testing.T) {
 
 	testDir, err := os.MkdirTemp("", "snmp-config")
 	require.NoError(t, err)
@@ -103,7 +193,9 @@ func Test_sidecarService_UpdateConfigReload_FailRecover(t *testing.T) {
 		configFile: configFile,
 	}
 
-	require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "should not be updated")
+	rt := s.GetRuntimeInfo()
+	require.Equal(t, "", rt.ZoneId)
+	require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
 	t.Run("bad yaml", func(t *testing.T) {
 
@@ -125,7 +217,10 @@ modules:
 		}()
 		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
 		require.Error(t, err, "UpdateConfigReload should return err")
-		require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "GetLastUpdateTs() should not be updated")
+		// 绑定的 zoneId 依然是空，时间戳也是空
+		rt = s.GetRuntimeInfo()
+		require.Equal(t, "", rt.ZoneId)
+		require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
 		afterUpdateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
 		require.NoError(t, err)
@@ -154,7 +249,10 @@ auths:
 		}()
 		err = s.UpdateConfigReload(context.TODO(), cmd, reloadCh)
 		require.Error(t, err, "UpdateConfigReload should return err")
-		require.Equal(t, time.Time{}, s.GetLastUpdateTs(), "GetLastUpdateTs() should not be updated")
+		// 绑定的 zoneId 依然是空，时间戳也是空
+		rt = s.GetRuntimeInfo()
+		require.Equal(t, "", rt.ZoneId)
+		require.Equal(t, time.Time{}, rt.LastUpdateTs)
 
 		afterUpdateConfigYaml, err := os.ReadFile(filepath.Join("..", "snmp.yml"))
 		require.NoError(t, err)

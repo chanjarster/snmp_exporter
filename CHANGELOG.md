@@ -1,3 +1,7 @@
+## 0.24.1-mod.2 / 2023-11-13
+
+* Enhanced management API
+
 ## 0.24.1-mod.1 / 2023-11-13
 
 * Enhanced management API
